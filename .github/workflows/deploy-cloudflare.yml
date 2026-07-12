@@ -1,3 +1,4 @@
+# Kept in the fork so GitHub indexes manual deployment runs.
 name: 🚀 Deploy cloud-mail to Cloudflare Workers
 
 on:
