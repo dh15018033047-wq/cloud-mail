@@ -63,6 +63,25 @@ jobs:
         working-directory: ./mail-worker
         run: pnpm wrangler telemetry disable
 
+      - name: 🌐 初始化 workers.dev 子域名 / Initialize workers.dev subdomain
+        run: |
+          SUBDOMAIN_RESPONSE=$(curl -fsS \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/subdomain")
+
+          if jq -e '.success == true and (.result.subdomain // "") != ""' <<< "$SUBDOMAIN_RESPONSE" >/dev/null; then
+            echo "workers.dev subdomain already exists."
+            exit 0
+          fi
+
+          SUBDOMAIN_HASH=$(printf '%s' "$CLOUDFLARE_ACCOUNT_ID" | sha256sum | cut -c1-10)
+          curl -fsS -X PUT \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data "{\"subdomain\":\"cloudmail${SUBDOMAIN_HASH}\"}" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/subdomain" \
+            | jq -e '.success == true' >/dev/null
+
       - name: 🛠️ 设置环境 / Set up environment
         working-directory: ./mail-worker
         run: |
