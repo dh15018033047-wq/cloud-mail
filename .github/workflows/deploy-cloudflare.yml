@@ -65,7 +65,7 @@ jobs:
 
       - name: 🌐 初始化 workers.dev 子域名 / Initialize workers.dev subdomain
         run: |
-          SUBDOMAIN_RESPONSE=$(curl -fsS \
+          SUBDOMAIN_RESPONSE=$(curl -sS \
             -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
             "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/subdomain")
 
