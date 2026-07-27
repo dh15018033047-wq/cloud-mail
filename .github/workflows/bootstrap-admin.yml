@@ -39,7 +39,7 @@ jobs:
           # list d1
           pnpm wrangler d1 list || true
           # enable multi email
-          pnpm wrangler d1 execute cloud-mail --remote --command "UPDATE setting SET many_email=1, add_email=1 WHERE 1=1;" || true
+          pnpm wrangler d1 execute cloud-mail --remote --command "UPDATE setting SET many_email=0, add_email=0 WHERE 1=1;" || true
           # reset password for ADMIN and known address
           if [ -n "${ADMIN:-}" ]; then
             ESC_ADMIN=$(printf "%s" "$ADMIN" | sed "s/'/''/g")
