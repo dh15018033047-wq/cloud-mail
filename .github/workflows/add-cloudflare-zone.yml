@@ -1,0 +1,51 @@
+name: Add Cloudflare zone
+
+on:
+  workflow_dispatch:
+    inputs:
+      zone_name:
+        description: Domain to add to Cloudflare
+        required: true
+        default: 2889322.xyz
+
+jobs:
+  add-zone:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      ZONE_NAME: ${{ inputs.zone_name }}
+    steps:
+      - name: Create or locate zone
+        id: zone
+        shell: bash
+        run: |
+          set -euo pipefail
+          API="https://api.cloudflare.com/client/v4"
+          AUTH=(-H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}")
+
+          EXISTING=$(curl -fsS "${AUTH[@]}" "${API}/zones?account.id=${CLOUDFLARE_ACCOUNT_ID}&name=${ZONE_NAME}")
+          ZONE_ID=$(jq -r '.result[0].id // empty' <<< "$EXISTING")
+
+          if [ -z "$ZONE_ID" ]; then
+            CREATED=$(curl -fsS -X POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+              --data "{\"name\":\"${ZONE_NAME}\",\"account\":{\"id\":\"${CLOUDFLARE_ACCOUNT_ID}\"},\"jump_start\":true}" \
+              "${API}/zones")
+            jq -e '.success == true' <<< "$CREATED" >/dev/null
+            ZONE_ID=$(jq -r '.result.id' <<< "$CREATED")
+            NAMESERVERS=$(jq -r '.result.name_servers[]' <<< "$CREATED" | paste -sd ', ' -)
+          else
+            DETAILS=$(curl -fsS "${AUTH[@]}" "${API}/zones/${ZONE_ID}")
+            NAMESERVERS=$(jq -r '.result.name_servers[]' <<< "$DETAILS" | paste -sd ', ' -)
+          fi
+
+          echo "zone_id=${ZONE_ID}" >> "$GITHUB_OUTPUT"
+          echo "nameservers=${NAMESERVERS}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## ${ZONE_NAME}"
+            echo
+            echo "Cloudflare zone: \`${ZONE_ID}\`"
+            echo
+            echo "Set these nameservers at the registrar: \`${NAMESERVERS}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
