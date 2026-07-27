@@ -25,9 +25,14 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           ADMIN: ${{ secrets.ADMIN }}
+          ADMIN_BOOTSTRAP_PASSWORD: ${{ secrets.ADMIN_BOOTSTRAP_PASSWORD }}
         run: |
           set -euo pipefail
-          PASS='GrokMail2026!'
+          if [ -z "${ADMIN_BOOTSTRAP_PASSWORD:-}" ]; then
+            echo "ADMIN_BOOTSTRAP_PASSWORD secret is required."
+            exit 1
+          fi
+          PASS="$ADMIN_BOOTSTRAP_PASSWORD"
           SALT=$(node -e "console.log(require('crypto').randomBytes(16).toString('base64'))")
           HASH=$(node -e "const s=process.argv[1],p=process.argv[2];console.log(require('crypto').createHash('sha256').update(Buffer.from(s+p,'utf8')).digest('base64'))" "$SALT" "$PASS")
           echo "Admin secret set: $([ -n "$ADMIN" ] && echo yes || echo no)"
@@ -41,4 +46,4 @@ jobs:
             pnpm wrangler d1 execute cloud-mail --remote --command "UPDATE user SET password='$HASH', salt='$SALT' WHERE email='$ESC_ADMIN' COLLATE NOCASE;" || true
           fi
           pnpm wrangler d1 execute cloud-mail --remote --command "UPDATE user SET password='$HASH', salt='$SALT' WHERE email='admin@2889372.xyz' COLLATE NOCASE;" || true
-          echo "BOOTSTRAP_DONE password=GrokMail2026!"
+          echo "BOOTSTRAP_DONE"
