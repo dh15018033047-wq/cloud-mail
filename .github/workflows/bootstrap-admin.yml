@@ -47,4 +47,5 @@ jobs:
           fi
           pnpm wrangler d1 execute cloud-mail --remote --command "UPDATE user SET password='$HASH', salt='$SALT' WHERE email='admin@2889372.xyz' COLLATE NOCASE;" || true
           pnpm wrangler d1 execute cloud-mail --remote --command "INSERT INTO account (email, name, user_id) SELECT 'test@2889322.xyz', 'test', u.user_id FROM user u WHERE u.email='admin@2889372.xyz' COLLATE NOCASE AND NOT EXISTS (SELECT 1 FROM account a WHERE a.email='test@2889322.xyz' COLLATE NOCASE);" || true
+          pnpm wrangler d1 execute cloud-mail --remote --command "SELECT email_id, to_email, subject, status, account_id, user_id FROM email WHERE to_email='test@2889322.xyz' ORDER BY email_id DESC LIMIT 5;" || true
           echo "BOOTSTRAP_DONE"
