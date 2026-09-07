@@ -1,0 +1,153 @@
+name: Setup Sub2API Named Tunnel
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  setup-tunnel:
+    name: Create/reuse tunnel + DNS
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Cloudflare named tunnel for api.2889372.xyz
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          ZONE_NAME="2889372.xyz"
+          HOSTNAME="api.2889372.xyz"
+          TUNNEL_NAME="sub2api-box"
+          CF_API="https://api.cloudflare.com/client/v4"
+          AUTH_H=(-H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" -H "Content-Type: application/json")
+
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+            echo "::error::Missing CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID secret"
+            exit 1
+          fi
+
+          echo "::add-mask::${CLOUDFLARE_API_TOKEN}"
+
+          echo "Looking up zone id for ${ZONE_NAME}..."
+          ZONE_RESP=$(curl -sS "${AUTH_H[@]}" \
+            "${CF_API}/zones?name=${ZONE_NAME}")
+          echo "$ZONE_RESP" | jq '{success, errors, result: (.result|map({id,name,status}))}'
+          ZONE_ID=$(echo "$ZONE_RESP" | jq -r '.result[0].id // empty')
+          if [ -z "$ZONE_ID" ] || [ "$ZONE_ID" = "null" ]; then
+            echo "::error::Failed to find zone ${ZONE_NAME}"
+            echo "$ZONE_RESP" | jq .
+            exit 1
+          fi
+          echo "ZONE_ID=${ZONE_ID}"
+
+          echo "Listing existing tunnels named ${TUNNEL_NAME}..."
+          LIST_RESP=$(curl -sS "${AUTH_H[@]}" \
+            "${CF_API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel?name=${TUNNEL_NAME}&is_deleted=false")
+          echo "$LIST_RESP" | jq '{success, errors, result: (.result|map({id,name,status,created_at}))}'
+          if ! echo "$LIST_RESP" | jq -e '.success == true' >/dev/null; then
+            echo "::error::Tunnel list failed"
+            echo "$LIST_RESP" | jq .
+            exit 1
+          fi
+          TUNNEL_ID=$(echo "$LIST_RESP" | jq -r '.result[0].id // empty')
+
+          if [ -z "$TUNNEL_ID" ] || [ "$TUNNEL_ID" = "null" ]; then
+            echo "Creating tunnel ${TUNNEL_NAME}..."
+            CREATE_RESP=$(curl -sS -X POST "${AUTH_H[@]}" \
+              "${CF_API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel" \
+              --data "{\"name\":\"${TUNNEL_NAME}\",\"config_src\":\"cloudflare\"}")
+            echo "$CREATE_RESP" | jq '{success, errors, result: (.result|{id,name,status})}'
+            if ! echo "$CREATE_RESP" | jq -e '.success == true' >/dev/null; then
+              echo "::error::Tunnel create failed"
+              echo "$CREATE_RESP" | jq .
+              exit 1
+            fi
+            TUNNEL_ID=$(echo "$CREATE_RESP" | jq -r '.result.id')
+          else
+            echo "Reusing existing tunnel id ${TUNNEL_ID}"
+          fi
+          echo "TUNNEL_ID=${TUNNEL_ID}"
+
+          echo "Putting tunnel ingress configuration..."
+          CONFIG_BODY=$(jq -n \
+            --arg hostname "$HOSTNAME" \
+            '{
+              config: {
+                ingress: [
+                  {hostname: $hostname, service: "http://127.0.0.1:8080"},
+                  {service: "http_status:404"}
+                ]
+              }
+            }')
+          CFG_RESP=$(curl -sS -X PUT "${AUTH_H[@]}" \
+            "${CF_API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel/${TUNNEL_ID}/configurations" \
+            --data "$CONFIG_BODY")
+          echo "$CFG_RESP" | jq '{success, errors, result_config: (.result.config.ingress // .result)}'
+          if ! echo "$CFG_RESP" | jq -e '.success == true' >/dev/null; then
+            echo "::error::Tunnel configuration PUT failed"
+            echo "$CFG_RESP" | jq .
+            exit 1
+          fi
+
+          echo "Getting tunnel token..."
+          TOKEN_RESP=$(curl -sS "${AUTH_H[@]}" \
+            "${CF_API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel/${TUNNEL_ID}/token")
+          if ! echo "$TOKEN_RESP" | jq -e '.success == true' >/dev/null; then
+            echo "::error::Tunnel token GET failed"
+            echo "$TOKEN_RESP" | jq '{success, errors}'
+            exit 1
+          fi
+          TUNNEL_TOKEN=$(echo "$TOKEN_RESP" | jq -r '.result')
+          if [ -z "$TUNNEL_TOKEN" ] || [ "$TUNNEL_TOKEN" = "null" ]; then
+            echo "::error::Empty tunnel token"
+            exit 1
+          fi
+          echo "::add-mask::${TUNNEL_TOKEN}"
+          echo "Tunnel token obtained (masked)."
+
+          echo "Creating/updating DNS CNAME ${HOSTNAME} -> ${TUNNEL_ID}.cfargotunnel.com ..."
+          DNS_LIST=$(curl -sS "${AUTH_H[@]}" \
+            "${CF_API}/zones/${ZONE_ID}/dns_records?type=CNAME&name=${HOSTNAME}")
+          RECORD_ID=$(echo "$DNS_LIST" | jq -r '.result[0].id // empty')
+          DNS_BODY=$(jq -n \
+            --arg name "$HOSTNAME" \
+            --arg content "${TUNNEL_ID}.cfargotunnel.com" \
+            '{type:"CNAME", name:$name, content:$content, proxied:true, ttl:1}')
+          if [ -n "$RECORD_ID" ] && [ "$RECORD_ID" != "null" ]; then
+            DNS_RESP=$(curl -sS -X PUT "${AUTH_H[@]}" \
+              "${CF_API}/zones/${ZONE_ID}/dns_records/${RECORD_ID}" \
+              --data "$DNS_BODY")
+          else
+            DNS_RESP=$(curl -sS -X POST "${AUTH_H[@]}" \
+              "${CF_API}/zones/${ZONE_ID}/dns_records" \
+              --data "$DNS_BODY")
+          fi
+          echo "$DNS_RESP" | jq '{success, errors, result: (.result|{id,name,type,content,proxied})}'
+          if ! echo "$DNS_RESP" | jq -e '.success == true' >/dev/null; then
+            echo "::error::DNS CNAME create/update failed"
+            echo "$DNS_RESP" | jq .
+            exit 1
+          fi
+
+          mkdir -p out
+          jq -n \
+            --arg tunnel_id "$TUNNEL_ID" \
+            --arg tunnel_name "$TUNNEL_NAME" \
+            --arg hostname "$HOSTNAME" \
+            --arg token "$TUNNEL_TOKEN" \
+            '{tunnel_id:$tunnel_id, tunnel_name:$tunnel_name, hostname:$hostname, token:$token}' \
+            > out/tunnel.json
+          echo "Wrote out/tunnel.json (token masked in logs)."
+          echo "DONE tunnel_id=${TUNNEL_ID} hostname=${HOSTNAME}"
+
+      - name: Upload tunnel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sub2api-tunnel
+          path: out/tunnel.json
+          retention-days: 1
