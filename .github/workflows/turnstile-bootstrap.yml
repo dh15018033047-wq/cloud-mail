@@ -3,60 +3,37 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: list_or_create
+        description: list_or_create_or_verify
         required: true
-        default: list
-      name:
-        description: widget_name
-        required: false
-        default: sub2api-public
-      domains:
-        description: comma_separated_domains
-        required: false
-        default: liable-automobiles-usual-motorcycle.trycloudflare.com,2889372.xyz,mail.2889372.xyz
+        default: verify
 jobs:
   run:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
-      - name: Turnstile list or create
+      - name: Verify CF token and Turnstile perms
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           ACTION: ${{ inputs.action }}
-          WIDGET_NAME: ${{ inputs.name }}
-          DOMAINS: ${{ inputs.domains }}
         run: |
           set -euo pipefail
-          test -n "$CLOUDFLARE_API_TOKEN"
-          test -n "$CLOUDFLARE_ACCOUNT_ID"
-          AUTH="Authorization: Bearer ${CLOUDFLARE_API_TOKEN}"
-          BASE="https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/challenges/widgets"
-          echo "Listing existing widgets..."
-          curl -sS -H "$AUTH" -H "Content-Type: application/json" "$BASE" | tee /tmp/widgets.json | jq '{success, result: [.result[]? | {sitekey, name, domains, mode, created_on}]}'
-          if [ "$ACTION" = "create" ]; then
-            EXISTING=$(jq -r --arg n "$WIDGET_NAME" '.result[]? | select(.name==$n) | .sitekey' /tmp/widgets.json | head -n1)
-            if [ -n "$EXISTING" ] && [ "$EXISTING" != "null" ]; then
-              echo "Reusing existing widget name=$WIDGET_NAME"
-              jq --arg n "$WIDGET_NAME" '.result[]? | select(.name==$n)' /tmp/widgets.json > /tmp/widget.json
-            else
-              DOMS_JSON=$(python3 -c "import os,json; print(json.dumps([d.strip() for d in os.environ['DOMAINS'].split(',') if d.strip()]))")
-              BODY=$(jq -n --arg name "$WIDGET_NAME" --argjson domains "$DOMS_JSON" '{name:$name, domains:$domains, mode:"managed"}')
-              echo "Creating widget..."
-              curl -sS -X POST -H "$AUTH" -H "Content-Type: application/json" --data "$BODY" "$BASE" | tee /tmp/create.json | jq '{success, errors, result: (.result | {sitekey, secret, name, domains, mode})}'
-              jq '.result' /tmp/create.json > /tmp/widget.json
-            fi
-          else
-            jq --arg d "$DOMAINS" '($d|split(",")) as $want | .result | (map(select((.domains//[]) as $dd | any($want[]; . as $w | ($dd|index($w))))) | .[0]) // .[0] // empty' /tmp/widgets.json > /tmp/widget.json
-          fi
-          echo "Selected:"
-          jq '{sitekey, name, domains, mode, has_secret:(.secret!=null)}' /tmp/widget.json
+          echo "account_id_len=${#CLOUDFLARE_ACCOUNT_ID}"
+          echo "token_len=${#CLOUDFLARE_API_TOKEN}"
+          curl -sS -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify" -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" -H "Content-Type: application/json" | tee /tmp/verify.json | jq '{success, status:.result.status, id:(.result.id|tostring|.[0:8]+"***")}'
+          curl -sS -X GET "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}" -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" -H "Content-Type: application/json" | tee /tmp/acct.json | jq '{success, errors, name:.result.name, id:(.result.id|tostring|.[0:8]+"***")}'
+          curl -sS -X GET "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/challenges/widgets" -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" -H "Content-Type: application/json" | tee /tmp/widgets.json | jq '{success, errors, count:(.result|length)}'
+          # Probe create with minimal body to capture exact auth error code
+          BODY='{"name":"sub2api-public","domains":["2889372.xyz"],"mode":"managed"}'
+          curl -sS -X POST "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/challenges/widgets" -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" -H "Content-Type: application/json" --data "$BODY" | tee /tmp/create.json | jq '{success, errors, result_sitekey:(.result.sitekey//null)}'
           mkdir -p out
-          jq '{site_key:.sitekey, secret_key:(.secret//""), name:.name, domains:.domains, mode:.mode, note:(if .secret then "secret from create response" else "list API does not return secret; create or rotate if missing" end)}' /tmp/widget.json > out/turnstile-keys.json
-          jq '{success, widgets:[.result[]?|{sitekey,name,domains,mode}]}' /tmp/widgets.json > out/turnstile-widgets.json
-      - name: Upload keys artifact
-        uses: actions/upload-artifact@v4
+          jq -n --slurpfile v /tmp/verify.json --slurpfile c /tmp/create.json --slurpfile w /tmp/widgets.json '{verify:$v[0], widgets_count:(($w[0].result//[])|length), create:$c[0]}' > out/diagnose.json
+          # If create succeeded, save keys
+          if jq -e '.success==true and .result.sitekey and .result.secret' /tmp/create.json >/dev/null; then
+            jq '{site_key:.result.sitekey, secret_key:.result.secret, name:.result.name, domains:.result.domains}' /tmp/create.json > out/turnstile-keys.json
+          else
+            echo '{"ok":false,"reason":"create_failed_or_missing_turnstile_edit_permission"}' > out/turnstile-keys.json
+          fi
+      - uses: actions/upload-artifact@v4
         with:
           name: turnstile-keys
           path: out/
