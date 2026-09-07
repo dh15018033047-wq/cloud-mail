@@ -3,24 +3,24 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: 'list or create'
+        description: list_or_create
         required: true
-        default: 'list'
+        default: list
       name:
-        description: 'widget name when creating'
+        description: widget_name
         required: false
-        default: 'sub2api-public'
+        default: sub2api-public
       domains:
-        description: 'comma-separated domains (no scheme)'
+        description: comma_separated_domains
         required: false
-        default: 'liable-automobiles-usual-motorcycle.trycloudflare.com,2889372.xyz,mail.2889372.xyz'
+        default: liable-automobiles-usual-motorcycle.trycloudflare.com,2889372.xyz,mail.2889372.xyz
 jobs:
   run:
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
-      - name: Turnstile list/create
+      - name: Turnstile list or create
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -36,40 +36,24 @@ jobs:
           echo "Listing existing widgets..."
           curl -sS -H "$AUTH" -H "Content-Type: application/json" "$BASE" | tee /tmp/widgets.json | jq '{success, result: [.result[]? | {sitekey, name, domains, mode, created_on}]}'
           if [ "$ACTION" = "create" ]; then
-            # If a widget with same name exists, reuse it
             EXISTING=$(jq -r --arg n "$WIDGET_NAME" '.result[]? | select(.name==$n) | .sitekey' /tmp/widgets.json | head -n1)
             if [ -n "$EXISTING" ] && [ "$EXISTING" != "null" ]; then
               echo "Reusing existing widget name=$WIDGET_NAME"
-              jq -r --arg n "$WIDGET_NAME" '.result[]? | select(.name==$n)' /tmp/widgets.json > /tmp/widget.json
+              jq --arg n "$WIDGET_NAME" '.result[]? | select(.name==$n)' /tmp/widgets.json > /tmp/widget.json
             else
-              # Build domains JSON array
-              DOMS_JSON=$(python3 - <<'PY'
-import os,json
-doms=[d.strip() for d in os.environ["DOMAINS"].split(",") if d.strip()]
-print(json.dumps(doms))
-PY
-)
+              DOMS_JSON=$(python3 -c "import os,json; print(json.dumps([d.strip() for d in os.environ['DOMAINS'].split(',') if d.strip()]))")
               BODY=$(jq -n --arg name "$WIDGET_NAME" --argjson domains "$DOMS_JSON" '{name:$name, domains:$domains, mode:"managed"}')
               echo "Creating widget..."
               curl -sS -X POST -H "$AUTH" -H "Content-Type: application/json" --data "$BODY" "$BASE" | tee /tmp/create.json | jq '{success, errors, result: (.result | {sitekey, secret, name, domains, mode})}'
               jq '.result' /tmp/create.json > /tmp/widget.json
             fi
           else
-            # Prefer widget whose domains intersect our targets; else first
-            jq --arg d "$DOMAINS" '
-              ($d|split(",")) as $want
-              | .result
-              | (map(select((.domains//[]) as $dd | any($want[]; . as $w | ($dd|index($w))))) | .[0])
-                // .[0]
-              // empty
-            ' /tmp/widgets.json > /tmp/widget.json
+            jq --arg d "$DOMAINS" '($d|split(",")) as $want | .result | (map(select((.domains//[]) as $dd | any($want[]; . as $w | ($dd|index($w))))) | .[0]) // .[0] // empty' /tmp/widgets.json > /tmp/widget.json
           fi
-          echo "Selected:" && jq '{sitekey, name, domains, mode, has_secret:(.secret!=null)}' /tmp/widget.json
-          # Persist for artifact (chmod not needed in runner)
+          echo "Selected:"
+          jq '{sitekey, name, domains, mode, has_secret:(.secret!=null)}' /tmp/widget.json
           mkdir -p out
-          # For list path, secret is NOT returned by Cloudflare list API — only create returns secret once.
           jq '{site_key:.sitekey, secret_key:(.secret//""), name:.name, domains:.domains, mode:.mode, note:(if .secret then "secret from create response" else "list API does not return secret; create or rotate if missing" end)}' /tmp/widget.json > out/turnstile-keys.json
-          # Also dump full list (no secrets)
           jq '{success, widgets:[.result[]?|{sitekey,name,domains,mode}]}' /tmp/widgets.json > out/turnstile-widgets.json
       - name: Upload keys artifact
         uses: actions/upload-artifact@v4
