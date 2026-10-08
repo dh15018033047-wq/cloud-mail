@@ -1,0 +1,4 @@
+name = "velune-dl"
+main = "index.js"
+compatibility_date = "2025-06-04"
+workers_dev = true
