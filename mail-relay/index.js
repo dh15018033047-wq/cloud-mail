@@ -64,7 +64,22 @@ async function smtpSend(env, to, subject, html) {
 
 export default {
 	async fetch(req, env) {
-		if (req.method === 'GET') return new Response('velune-mail-relay', { status: 200 });
+		if (req.method === 'GET') {
+			const u = new URL(req.url);
+			const probe = u.searchParams.get('probe');
+			const auth = req.headers.get('authorization') || '';
+			if (auth !== `Bearer ${env.RELAY_KEY}`) return new Response('denied', { status: 403 });
+			if (probe) {
+				const [h, p] = probe.split(':');
+				try {
+					const s = connect({ hostname: h, port: Number(p) }, { secureTransport: 'on' });
+					const r = s.readable.getReader();
+					const res = await Promise.race([r.read(), new Promise((_, j) => setTimeout(() => j(new Error('timeout')), 8000))]);
+					return Response.json({ ok: true, first: new TextDecoder().decode(res.value || new Uint8Array()).slice(0, 80) });
+				} catch (e) { return Response.json({ ok: false, error: String(e).slice(0, 200) }); }
+			}
+			return new Response('velune-mail-relay', { status: 200 });
+		}
 		if (req.method !== 'POST') return new Response('method not allowed', { status: 405 });
 		const auth = req.headers.get('authorization') || '';
 		if (auth !== `Bearer ${env.RELAY_KEY}`) return new Response('denied', { status: 403 });
